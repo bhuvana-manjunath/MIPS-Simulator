@@ -1,4 +1,4 @@
 mips: MIPS_pipeline.cpp
-	g++ MIPS_pipeline.cpp -o MIPS_pipeline
+	g++ -std=c++11 MIPS_pipeline.cpp -o MIPS_pipeline
 clean:
 	rm MIPS_pipeline
