@@ -1,13 +1,29 @@
 /*
-Cache Simulator
-Level one L1 and level two L2 cache parameters are read from file (block size, line per set and set per cache).
-The 32 bit address is divided into tag bits (t), set index bits (s) and block offset bits (b)
-s = log2(#sets)   b = log2(block size in bytes)  t=32-s-b
-32 bit address (MSB -> LSB): TAG || SET || OFFSET
+--------------------------------------------------------
+               Two-Level Cache Simulator
+--------------------------------------------------------
 
-Tag Bits   : the tag field along with the valid bit is used to determine whether the block in the cache is valid or not.
-Index Bits : the set index field is used to determine which set in the cache the block is stored in.
-Offset Bits: the offset field is used to determine which byte in the block is being accessed.
+This simulator models a two-level cache hierarchy (L1 and L2) based on 
+user-supplied configuration parameters. It supports both read and write 
+operations and simulates cache hits, misses, and block evictions.
+
+---------------------
+Address Breakdown:
+---------------------
+Given a 32-bit memory address, we divide it as:
+
+    [ TAG | SET INDEX | BLOCK OFFSET ]
+
+Where:
+  - TAG:      Identifies the unique memory block
+  - SET INDEX: Selects a specific set in the cache
+  - OFFSET:    Selects a byte within a block
+
+Formulas:
+  - Number of sets = (cache size × 1024) / (block size × set size)
+  - Offset bits = log2(block size)
+  - Index bits  = log2(number of sets)
+  - Tag bits    = 32 - index bits - offset bits
 */
 
 #include <algorithm>
