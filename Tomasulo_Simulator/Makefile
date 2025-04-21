@@ -1,2 +1,4 @@
 tomasulosimulator: tomasulosimulator.cpp
-	g++ -g tomasulosimulator.cpp -o tomasulosimulator.out
+	g++ -g -std=c++11 tomasulosimulator.cpp -o tomasulosimulator
+clean:
+	tomasulosimulator

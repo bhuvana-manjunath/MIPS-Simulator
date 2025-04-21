@@ -1,3 +1,22 @@
+/*
+--------------------------------------------------------
+         Tomasulo's Algorithm Simulator - Core Setup
+--------------------------------------------------------
+
+This module sets up the data structures and utilities for simulating
+Tomasulo’s Algorithm, supporting out-of-order execution via:
+
+  - Reservation stations for ADD, MULT, LOAD, STORE units
+  - Common Data Bus (CDB) to broadcast results
+  - Register result status tracking
+  - Instruction timing (issue, execute, write result)
+
+Instructions are read from `trace.txt`, and hardware specs from `config.txt`.
+Outputs will be saved in `trace.out.txt`.
+
+Supported operations: ADD, SUB, MULT, DIV, LOAD, STORE
+*/
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -19,343 +38,273 @@ string inputtracename = "trace.txt";
 string outputtracename = inputtracename.substr(0, inputtracename.length() - 4) + ".out.txt";
 string hardwareconfigname = "config.txt";
 
-// Common Data Bus
-struct CDBMessage
-{
-	std::string stationName;
-	int remainCycle; // Name of the functional unit (reservation station)
-	int op;
+// -----------------------------------
+// Common Data Bus (CDB)
+// -----------------------------------
+
+struct CDBMessage {
+	std::string stationName; // Source reservation station name
+	int remainCycle;         // Issue cycle (used for prioritization)
+	int op;                  // Operation type (ADD, MULT, etc.)
+
 	CDBMessage(const std::string &name, int cycle, int opInt)
-	{
-		stationName = name;
-		remainCycle = cycle;
-		op = opInt;
-	}
+		: stationName(name), remainCycle(cycle), op(opInt) {}
 };
 
-class CommonDataBus
-{
+class CommonDataBus {
 private:
 	std::vector<CDBMessage> messages;
 
 public:
-	// Function to broadcast a message on the CDB
-	void broadcast(const std::string &stationName, int rcycle, int op)
-	{
-		CDBMessage message(stationName, rcycle, op);
-		messages.push_back(message);
+	// Broadcast a result on the CDB
+	void broadcast(const std::string &stationName, int rcycle, int op) {
+		messages.emplace_back(stationName, rcycle, op);
 	}
 
-	// Function to get the last message from the CDB
-	CDBMessage getLastMessage()
-	{
-		CDBMessage smallest("", 99, -1);
-		if (!messages.empty())
-		{
-			// Initialize with default values
-			smallest.remainCycle = std::numeric_limits<int>::max(); // Set to maximum possible value
+	// Get the CDB message with the earliest issue cycle
+	CDBMessage getLastMessage() {
+		CDBMessage smallest("NONE", std::numeric_limits<int>::max(), -1);
 
-			for (const auto &m : messages)
-			{
-				if (m.remainCycle < smallest.remainCycle)
-				{
-					smallest = m;
-				}
+		for (const auto &m : messages) {
+			if (m.remainCycle < smallest.remainCycle) {
+				smallest = m;
 			}
-			return smallest;
 		}
-		else
-		{
-			// Return a default message if the CDB is empty
-			smallest = CDBMessage("NONE", 1, -1);
-		}
-		// cout << "RS with the least IssueCycle updates RRS: " << smallest.stationName << endl;
 		return smallest;
 	}
 
-	// To print the CDB Queue
-	void printCDB()
-	{
-		for (auto &c : messages)
-		{
-			cout << "|| Name: " << c.stationName << " Issue Cycle: " << c.remainCycle << " Op: " << c.op << " ||    ";
+	// Print all current CDB messages (for debugging)
+	void printCDB() {
+		for (auto &c : messages) {
+			cout << "|| Name: " << c.stationName << " Issue Cycle: "
+				 << c.remainCycle << " Op: " << c.op << " ||    ";
 		}
 		cout << endl;
 	}
 
-	// Removes the CDB Message from the Messages Queue with the smallest IssueCycle
-	CDBMessage RemoveSmallest()
-	{
-		if (!messages.empty())
-		{
-			auto smallest = messages.begin();
-			for (auto it = messages.begin() + 1; it != messages.end(); ++it)
-			{
-				if (it->remainCycle < smallest->remainCycle)
-				{
-					smallest = it;
-				}
-			}
+	// Remove and return the CDB message with the earliest issue cycle
+	CDBMessage RemoveSmallest() {
+		if (messages.empty()) return CDBMessage("NONE", 1, -1);
 
-			CDBMessage smallestMessage = *smallest;
-			messages.erase(smallest); // Remove the smallest message from the vector
-			return smallestMessage;
+		auto smallest = messages.begin();
+		for (auto it = messages.begin() + 1; it != messages.end(); ++it) {
+			if (it->remainCycle < smallest->remainCycle) {
+				smallest = it;
+			}
 		}
-		else
-		{
-			// If the vector is empty, return a default message
-			return CDBMessage("NONE", 1, -1);
-		}
+
+		CDBMessage result = *smallest;
+		messages.erase(smallest);
+		return result;
 	}
 };
 
-CommonDataBus cdb;
+CommonDataBus cdb;  // Global CDB instance
 
-// Operations
-enum Operation
-{
-	ADD,
-	SUB,
-	MULT,
-	DIV,
-	LOAD,
-	STORE
-};
+// -----------------------------------
+// Operation Types and Execution Latencies
+// -----------------------------------
 
-// The execute cycle of each operation: ADD, SUB, MULT, DIV, LOAD, STORE
+enum Operation { ADD, SUB, MULT, DIV, LOAD, STORE };
+
+// Execution latency for each instruction type
 const int OperationCycle[6] = {2, 2, 10, 40, 2, 2};
 
+// -----------------------------------
 // Hardware Configuration
-struct HardwareConfig
-{
-	int LoadRSsize;	 // number of load reservation stations
-	int StoreRSsize; // number of store reservation stations
-	int AddRSsize;	 // number of add reservation stations
-	int MultRSsize;	 // number of multiply reservation stations
-	int FRegSize;	 // number of fp registers
+// -----------------------------------
+
+struct HardwareConfig {
+	int LoadRSsize;
+	int StoreRSsize;
+	int AddRSsize;
+	int MultRSsize;
+	int FRegSize;
 };
 
-// Structure for Instructions
-struct Instruction
-{
+// -----------------------------------
+// Instruction Format
+// -----------------------------------
+
+struct Instruction {
 	Operation op;
 	string destRegister;
 	std::string srcReg1;
 	std::string srcReg2;
 };
 
-// Helper function to read instructions from a file and store in a vector
-std::vector<Instruction> readInstruction(const std::string &filename)
-{
+// Read instructions from trace file
+std::vector<Instruction> readInstruction(const std::string &filename) {
 	std::ifstream file(filename);
 	std::vector<Instruction> instructions;
 
-	if (file.is_open())
-	{
+	if (file.is_open()) {
 		std::string line;
-		while (std::getline(file, line))
-		{
+		while (std::getline(file, line)) {
 			std::istringstream iss(line);
 			std::string opStr, destReg, srcReg1, srcReg2;
 			iss >> opStr >> destReg >> srcReg1 >> srcReg2;
 
 			Operation op;
-			if (opStr == "ADD")
-			{
-				op = Operation::ADD;
-			}
-			else if (opStr == "SUB")
-			{
-				op = Operation::SUB;
-			}
-			else if (opStr == "MULT")
-			{
-				op = Operation::MULT;
-			}
-			else if (opStr == "DIV")
-			{
-				op = Operation::DIV;
-			}
-			else if (opStr == "LOAD")
-			{
-				op = Operation::LOAD;
-			}
-			else if (opStr == "STORE")
-			{
-				op = Operation::STORE;
-			}
-			// int destRegister = extractNumericPart(destReg);
+			if (opStr == "ADD") op = Operation::ADD;
+			else if (opStr == "SUB") op = Operation::SUB;
+			else if (opStr == "MULT") op = Operation::MULT;
+			else if (opStr == "DIV") op = Operation::DIV;
+			else if (opStr == "LOAD") op = Operation::LOAD;
+			else if (opStr == "STORE") op = Operation::STORE;
+
 			instructions.push_back({op, destReg, srcReg1, srcReg2});
 		}
 		file.close();
-	}
-	else
-	{
+	} else {
 		std::cout << "Unable to open file " << filename << std::endl;
 	}
-
 	return instructions;
 }
 
-// Helper function to extract numeric part of fp register
-int extractNumericPart(const std::string &str)
-{
+// Extract numeric part from register name (e.g., F6 → 6)
+int extractNumericPart(const std::string &str) {
 	std::string numericPart;
-	for (char ch : str)
-	{
-		if (std::isdigit(ch))
-		{
-			numericPart += ch;
-		}
+	for (char ch : str) {
+		if (std::isdigit(ch)) numericPart += ch;
 	}
 	return std::stoi(numericPart);
 }
 
-// Structure to record the time of each instruction
-struct InstructionStatus
-{
+// -----------------------------------
+// Instruction Status Tracker
+// -----------------------------------
+
+struct InstructionStatus {
 	int cycleIssued;
-	int cycleExecuted; // execution completed
-	int cycleWriteResult;
+	int cycleExecuted;       // When execution completes
+	int cycleWriteResult;    // When result is broadcast on CDB
 	bool isComplete = false;
 };
 
-/*********************************** ↓↓↓ Todo: Implement by you ↓↓↓ ******************************************/
-// Register Result Status
-struct RegisterResultStatus
-{
-	string ReservationStationName;
-	bool dataReady;
+// --------------------------------------------------------
+// Register Result Status (RRS)
+// --------------------------------------------------------
+// Tracks the status of each floating-point register:
+//   - Which reservation station (RS) is producing its value
+//   - Whether the data is ready
+// This module supports updates during instruction issue,
+// CDB broadcasts, and periodic printing for debugging
+// --------------------------------------------------------
+
+struct RegisterResultStatus {
+	string ReservationStationName; // Name of the RS writing to this register
+	bool dataReady;                // True if data has been written and is ready
 };
 
-class RegisterResultStatuses
-{
+class RegisterResultStatuses {
 public:
-	void initRegisterResultStatuses(int numFPReg)
-	{
+	// Initialize RRS table with `numFPReg` entries, one per floating-point register
+	void initRegisterResultStatuses(int numFPReg) {
 		_registers.resize(numFPReg);
-		for (int i = 0; i < _registers.size(); i++)
-		{
-			_registers[i].dataReady = false;
+		for (int i = 0; i < _registers.size(); i++) {
 			_registers[i].ReservationStationName = "";
+			_registers[i].dataReady = false;
 		}
 	}
 
-	void updateRegisterStatus(const std::string &destRegister, const std::string &reservationStationName)
-	{
-		// Extracting the numeric part from destRegister
-		std::string numericPart = destRegister.substr(1); // Assuming the register names start with 'F'
-		// Convert the numeric part to an integer for comparison
-		int destRegisterNumber = std::stoi(numericPart);
-
-		for (int i = 0; i < _registers.size(); ++i)
-		{
-			if (destRegisterNumber == i)
-			{
-				// Update the destination register status with the reservation station name
-				_registers[i].ReservationStationName = reservationStationName;
-				_registers[i].dataReady = false;
-
-				break; // Once found, exit the loop
-			}
+	// Set a destination register as waiting on a reservation station (during issue)
+	void updateRegisterStatus(const std::string &destRegister, const std::string &reservationStationName) {
+		int destRegisterNumber = extractNumericPart(destRegister);
+		if (destRegisterNumber >= 0 && destRegisterNumber < _registers.size()) {
+			_registers[destRegisterNumber].ReservationStationName = reservationStationName;
+			_registers[destRegisterNumber].dataReady = false;
 		}
 	}
 
-	string _printRegisterResultStatus() const
-	{
+	// Return a string representing the status of all FP registers
+	string _printRegisterResultStatus() const {
 		std::ostringstream result;
-		for (int idx = 0; idx < _registers.size(); idx++)
-		{
-			result << "F" + std::to_string(idx) << ": ";
+		for (int idx = 0; idx < _registers.size(); idx++) {
+			result << "F" << idx << ": ";
 			result << _registers[idx].ReservationStationName << ", ";
-			result << "dataRdy: " << (_registers[idx].dataReady ? "Y" : "N") << ", ";
-			result << "\n";
+			result << "dataRdy: " << (_registers[idx].dataReady ? "Y" : "N") << ",\n";
 		}
 		return result.str();
 	}
 
-	bool isDataReady(const std::string &registerName) const
-	{
-		// Check if Data is Ready in a particular Floating Point Register
+	// Check whether the given register has data ready
+	bool isDataReady(const std::string &registerName) const {
 		int registerNumber = extractNumericPart(registerName);
-		if (registerNumber >= 0 && registerNumber < _registers.size())
-		{
+		if (registerNumber >= 0 && registerNumber < _registers.size()) {
 			return _registers[registerNumber].dataReady;
 		}
-		return false; // Invalid register name or number
+		return false;
 	}
 
-	std::string getReservationStationName(const std::string &registerName) const
-	{
-		// Decode Operand, obtained the RS name corresponding to the Given Floating Point Regiser
+	// Get the RS name currently writing to the specified register
+	std::string getReservationStationName(const std::string &registerName) const {
 		int registerNumber = extractNumericPart(registerName);
-		if (registerNumber >= 0 && registerNumber < _registers.size())
-		{
+		if (registerNumber >= 0 && registerNumber < _registers.size()) {
 			return _registers[registerNumber].ReservationStationName;
 		}
-		return ""; // Invalid register name or number
+		return "";
 	}
 
-	void updateRRS(string RSName)
-	{
-		// Update the Register with the input RS name with data ready  =  true
-		for (auto &r : _registers)
-		{
-
-			if (r.ReservationStationName == RSName)
-			{
-				r.dataReady = true;
+	// Mark all registers being written by a completed RS as dataReady = true
+	void updateRRS(string RSName) {
+		for (auto &reg : _registers) {
+			if (reg.ReservationStationName == RSName) {
+				reg.dataReady = true;
 			}
 		}
 	}
 
-	string getRegisterWithOutput(string stationName)
-	{
-		// Returns the Name of the register corresponding to the stationname with data Ready  = True
-		for (int i = 0; i < _registers.size(); i++)
-		{
-			if (_registers[i].ReservationStationName == stationName && _registers[i].dataReady == true)
-			{
+	// Return the register name being written by the given RS (if data is ready)
+	string getRegisterWithOutput(string stationName) {
+		for (int i = 0; i < _registers.size(); i++) {
+			if (_registers[i].ReservationStationName == stationName && _registers[i].dataReady == true) {
 				return "F" + std::to_string(i);
 			}
 		}
+		return "";
 	}
 
 private:
-	vector<RegisterResultStatus> _registers;
+	vector<RegisterResultStatus> _registers; // Vector of per-register status entries
 };
 
-// Reservation Station
-struct ReservationStation
-{
-	string name;
-	bool busy;
-	string Vj;
-	string Vk;
-	string Qj;
-	string Qk;
-	int remainCycle;
-	int op;
-	string dest;
-	int issueCycle;
-	int executeCycle;
-	int writeCycle;
-	int instructionIndex;
+// --------------------------------------------------------
+// Reservation Station (RS) & ReservationStations Manager
+// --------------------------------------------------------
+// Each RS represents a functional unit slot for ADD/SUB, MULT/DIV, LOAD, STORE
+// - Tracks operand readiness (Vj/Vk or Qj/Qk)
+// - Holds execution countdown (`remainCycle`)
+// - Handles issue, execute, and writeback timing
+// The ReservationStations class manages a group of these
+// --------------------------------------------------------
+
+// Reservation Station structure representing one slot
+struct ReservationStation {
+	string name;         // Station name (e.g., Add0, Load1)
+	bool busy;           // True if this station is currently executing or waiting
+	string Vj, Vk;       // Operand values (if available)
+	string Qj, Qk;       // Reservation stations producing Vj/Vk (if not ready)
+	int remainCycle;     // Remaining execution cycles
+	int op;              // Operation type (enum)
+	string dest;         // Destination register
+	int issueCycle;      // Cycle in which instruction was issued
+	int executeCycle;    // Cycle when execution completes
+	int writeCycle;      // Cycle when result is written to CDB
+	int instructionIndex;// Index of associated instruction
 };
 
-class ReservationStations
-{
+// ReservationStations manages a group of RS units for one operation type
+class ReservationStations {
 private:
 	std::vector<ReservationStation> stations;
 
 public:
-	ReservationStations(int size, const std::string &name)
-	{
+	// Constructor initializes N RS entries with a given name prefix
+	ReservationStations(int size, const std::string &name) {
 		stations.resize(size);
-		for (int i = 0; i < size; ++i)
-		{
-			stations[i].name = name + std::to_string(i); // Naming each station uniquely
-			// Initialize other fields as needed
+		for (int i = 0; i < size; ++i) {
+			stations[i].name = name + std::to_string(i);
 			stations[i].busy = false;
 			stations[i].Vj = "";
 			stations[i].Vk = "";
@@ -370,113 +319,95 @@ public:
 		}
 	}
 
-	ReservationStation *findAvailableStation()
-	{
-		// Look for RS with Busy = 0
-		for (auto &station : stations)
-		{
-			if (!station.busy)
-			{
-				return &station;
-			}
+	// Find the first available (non-busy) RS
+	ReservationStation* findAvailableStation() {
+		for (auto &station : stations) {
+			if (!station.busy) return &station;
 		}
-		return nullptr; // No available station found
+		return nullptr;
 	}
 
-	void update(string RSName)
-	{
-		// If any of the Reservation Station is waiting for another RS output (Qj/Qk), set the operands as ready, Qj->Vj or Qk->Vk
-		for (auto &station : stations)
-		{
-			if (RSName == "")
-			{
-				continue;
+	// Update RS operands if a dependency has been resolved (CDB broadcast)
+	void update(string RSName) {
+		for (auto &station : stations) {
+			if (station.Qj == RSName) {
+				station.Vj = "R(" + RSName + ")";
+				station.Qj = "";
 			}
-			else
-			{
-				if (station.Qj == RSName)
-				{
-					station.Vj = "R(" + RSName + ")";
-					station.Qj = "";
-				}
-				if (station.Qk == RSName)
-				{
-					station.Vk = "R(" + RSName + ")";
-					station.Qk = "";
-				}
+			if (station.Qk == RSName) {
+				station.Vk = "R(" + RSName + ")";
+				station.Qk = "";
 			}
 		}
 	}
 
-	void updateRemainingCycles(RegisterResultStatuses &RRS, vector<InstructionStatus> &instructionStatuses, int currentCycle)
-	{
-		for (auto &station : stations)
-		{
-			if (station.busy)
-			{
-				if (!station.Vj.empty() && !station.Vk.empty() && station.Qj.empty() && station.Qk.empty())
-				{
-					// Both Vj and Vk are available, decrement remaining cycle by 1
-					station.remainCycle--;
+	// Decrement timers and handle CDB broadcast triggers
+	void updateRemainingCycles(RegisterResultStatuses &RRS, vector<InstructionStatus> &instructionStatuses, int currentCycle) {
+		for (auto &station : stations) {
+			if (station.busy && station.Qj.empty() && station.Qk.empty() && !station.Vj.empty() && !station.Vk.empty()) {
+				station.remainCycle--;
 
-					if (station.remainCycle == 0)
-					{
-						// Execution of the Instruction in RS Complete in this Cycle
-						station.executeCycle = currentCycle;
-						instructionStatuses[station.instructionIndex].cycleExecuted = station.executeCycle;
-						instructionStatuses[station.instructionIndex].isComplete = false;
-					}
+				if (station.remainCycle == 0) {
+					station.executeCycle = currentCycle;
+					instructionStatuses[station.instructionIndex].cycleExecuted = currentCycle;
+					instructionStatuses[station.instructionIndex].isComplete = false;
+				}
 
-					if (station.remainCycle == -1)
-					{
-						// BroadCast Output of RS to CDB for Writeback
-						cdb.broadcast(station.name, station.issueCycle, station.op);
-					}
+				if (station.remainCycle == -1) {
+					// Push to CDB to trigger writeback in the next cycle
+					cdb.broadcast(station.name, station.issueCycle, station.op);
 				}
 			}
 		}
 	}
 
-	void completeWriteBack(string RSName, vector<InstructionStatus> &instructionStatuses, int currentCycle)
-	{
-		for (auto &station : stations)
-		{
-			if (station.name == RSName)
-			{
-				// Write Back is Complete, set Busy = False for RS and reset Vj Vk ; Update the WritebackCycle Value in Instruction Status
+	// Free a station after its result is written back
+	void completeWriteBack(string RSName, vector<InstructionStatus> &instructionStatuses, int currentCycle) {
+		for (auto &station : stations) {
+			if (station.name == RSName) {
 				station.busy = false;
 				station.Vj = "";
 				station.Vk = "";
 				station.writeCycle = currentCycle;
-				instructionStatuses[station.instructionIndex].cycleWriteResult = station.writeCycle;
+				instructionStatuses[station.instructionIndex].cycleWriteResult = currentCycle;
 				instructionStatuses[station.instructionIndex].isComplete = true;
 			}
 		}
 	}
 
-	void printStations() const
-	{
-
-		for (const auto &station : stations)
-		{
-			std::cout << std::left << std::setw(20) << ("Name: " + station.name) << std::setw(10)
-					  << ("Busy: " + std::to_string(station.busy)) << std::setw(10) << ("Vj: " + station.Vj)
-					  << std::setw(10) << ("Vk: " + station.Vk) << std::setw(10) << ("Qj: " + station.Qj)
-					  << std::setw(10) << ("Qk: " + station.Qk) << std::setw(15) << ("RemainCycle: " + std::to_string(station.remainCycle))
-					  << std::setw(15) << ("\tIssueCycle: " + std::to_string(station.issueCycle))
-					  << std::setw(15) << ("\tExecuteCycle: " + std::to_string(station.executeCycle))
-					  << std::setw(15) << ("\tWriteCycle " + std::to_string(station.writeCycle))
-					  << std::setw(15) << ("\tInstructionIndex " + std::to_string(station.instructionIndex)) << endl;
+	// Print current state of all RS entries (for debugging/logging)
+	void printStations() const {
+		for (const auto &station : stations) {
+			std::cout << std::left
+					  << std::setw(20) << ("Name: " + station.name)
+					  << std::setw(10) << ("Busy: " + std::to_string(station.busy))
+					  << std::setw(10) << ("Vj: " + station.Vj)
+					  << std::setw(10) << ("Vk: " + station.Vk)
+					  << std::setw(10) << ("Qj: " + station.Qj)
+					  << std::setw(10) << ("Qk: " + station.Qk)
+					  << std::setw(15) << ("RemainCycle: " + std::to_string(station.remainCycle))
+					  << std::setw(15) << ("IssueCycle: " + std::to_string(station.issueCycle))
+					  << std::setw(15) << ("ExecuteCycle: " + std::to_string(station.executeCycle))
+					  << std::setw(15) << ("WriteCycle: " + std::to_string(station.writeCycle))
+					  << std::setw(15) << ("InstrIndex: " + std::to_string(station.instructionIndex))
+					  << endl;
 		}
 	}
 };
 
+// ---------------------------------------------------------------------
+// TomasuloAlgorithm Class
+// ---------------------------------------------------------------------
+// Simulates instruction issue, execution, and writeback using Tomasulo’s algorithm.
+// Handles dependencies, register result status, reservation station status,
+// and CDB communication for all instruction types (ADD, SUB, MULT, DIV, LOAD, STORE).
+// ---------------------------------------------------------------------
 class TomasuloAlgorithm
 {
 public:
-	RegisterResultStatuses RRS;
-	std::vector<InstructionStatus> instructionStatuses;
-	int instrSize;
+	RegisterResultStatuses RRS;                  // Tracks destination registers and RS dependencies
+	std::vector<InstructionStatus> instructionStatuses;  // Records issue, execute, write cycles
+	int instrSize;                               // Number of instructions in trace
 
 public:
 	TomasuloAlgorithm(const HardwareConfig &config, int instructionSize)
@@ -485,268 +416,164 @@ public:
 		  addRS(config.AddRSsize, "Add"),
 		  multRS(config.MultRSsize, "Mult"),
 		  instructionStatuses()
-
 	{
 		RRS.initRegisterResultStatuses(config.FRegSize);
 		instructionStatuses.resize(instructionSize);
 		instrSize = instructionSize;
 	}
 
+	// ---------------------------------------------------------------------
+	// Issue Logic
+	// ---------------------------------------------------------------------
+	// Finds an available RS and issues the instruction into it if possible.
+	// Sets operands or marks pending dependencies via Qj/Qk.
+	// Updates Register Result Status (RRS) for the destination register.
+	// ---------------------------------------------------------------------
 	bool issueInstructions(const Instruction &instr, int currentCycle, int instrCycle)
 	{
-		// cout << "Current Cycle ->" << currentCycle << endl;
-		// cout << "OP: " << instr.op << " " << instr.destRegister << " " << instr.srcReg1 << " " << instr.srcReg2 << endl;
 		ReservationStation *selectedRS = nullptr;
+
+		// Choose the appropriate RS pool based on operation
 		switch (instr.op)
 		{
 		case Operation::ADD:
-			selectedRS = addRS.findAvailableStation();
-			if (selectedRS)
-			{
-				selectedRS->remainCycle = OperationCycle[ADD];
-				selectedRS->op = ADD;
-			}
-			break;
-
 		case Operation::SUB:
 			selectedRS = addRS.findAvailableStation();
-			if (selectedRS)
-			{
-				selectedRS->remainCycle = OperationCycle[SUB];
-				selectedRS->op = SUB;
-			}
 			break;
-
 		case Operation::MULT:
-			selectedRS = multRS.findAvailableStation();
-			if (selectedRS)
-			{
-				selectedRS->remainCycle = OperationCycle[MULT];
-				selectedRS->op = MULT;
-			}
-			break;
-
 		case Operation::DIV:
 			selectedRS = multRS.findAvailableStation();
-			if (selectedRS)
-			{
-				selectedRS->remainCycle = OperationCycle[DIV];
-				selectedRS->op = DIV;
-			}
 			break;
-
 		case Operation::LOAD:
 			selectedRS = loadRS.findAvailableStation();
-			if (selectedRS)
-			{
-				selectedRS->remainCycle = OperationCycle[LOAD];
-				selectedRS->op = LOAD;
-			}
 			break;
-
 		case Operation::STORE:
 			selectedRS = storeRS.findAvailableStation();
-			if (selectedRS)
-			{
-				selectedRS->remainCycle = OperationCycle[STORE];
-				selectedRS->op = STORE;
-			}
 			break;
-
-			// Add cases for other operation types as needed
 		}
+
+		// If an RS is available, set up and issue instruction
 		if (selectedRS)
 		{
-			// if (instrCycle <= instructionStatuses.size())
-			//{
+			selectedRS->remainCycle = OperationCycle[instr.op];
+			selectedRS->op = instr.op;
 			selectedRS->issueCycle = currentCycle;
-			if (instrCycle >= instrSize)
-			{
-				selectedRS->instructionIndex = instrSize - 1;
-			}
-			else
-			{
-				selectedRS->instructionIndex = instrCycle;
-			}
-
+			selectedRS->instructionIndex = std::min(instrCycle, instrSize - 1);
 			instructionStatuses[instrCycle].cycleIssued = currentCycle;
 			instructionStatuses[instrCycle].isComplete = false;
-			//}
-			// Update the issueCycle in instructionStatuses
-
-			// if RS is of LOAD or STORE, update VK Vj accordingly
-			bool allOperandsAvailable = true;
 			selectedRS->busy = true;
 
+			// LOAD case: address-based
 			if (instr.op == LOAD)
 			{
 				selectedRS->Vj = instr.srcReg1;
 				selectedRS->Vk = instr.srcReg2;
-				selectedRS->op = (instr.op == LOAD) ? 4 : 5;
-				selectedRS->remainCycle = (instr.op == LOAD) ? OperationCycle[LOAD] : OperationCycle[STORE];
-				selectedRS->busy = true;
 				selectedRS->dest = instr.destRegister;
 			}
+			// STORE and other register-based ops
 			else
 			{
-
-				// Check if both source registers are available
-				if (instr.op == STORE)
+				if (instr.op == STORE && !RRS.isDataReady(instr.destRegister) && instr.destRegister[0] == 'F')
 				{
-					if (!RRS.isDataReady(instr.destRegister) && instr.destRegister[0] == 'F')
-					{
-						selectedRS->Qj = RRS.getReservationStationName(instr.destRegister);
-						selectedRS->Vj = "";
-						selectedRS->Vk = "";
-					}
-					else
-					{
-						selectedRS->Vj = instr.srcReg1;
-						selectedRS->Vk = instr.srcReg2;
-					}
+					selectedRS->Qj = RRS.getReservationStationName(instr.destRegister);
+				}
+				else if (instr.op == STORE)
+				{
+					selectedRS->Vj = instr.srcReg1;
+					selectedRS->Vk = instr.srcReg2;
 				}
 
-				if (RRS.isDataReady(instr.srcReg1) == false && instr.srcReg1[0] == 'F')
-				{
-					// Source register 1 is not ready
+				if (!RRS.isDataReady(instr.srcReg1) && instr.srcReg1[0] == 'F')
 					selectedRS->Qj = RRS.getReservationStationName(instr.srcReg1);
-					allOperandsAvailable = false;
-				}
 				else
-				{
-					selectedRS->Vj = instr.srcReg1; // Source register 1 is available
-				}
+					selectedRS->Vj = instr.srcReg1;
 
-				if (RRS.isDataReady(instr.srcReg2) == false && instr.srcReg2[0] == 'F')
-				{
-					// Source register 2 is not ready
+				if (!RRS.isDataReady(instr.srcReg2) && instr.srcReg2[0] == 'F')
 					selectedRS->Qk = RRS.getReservationStationName(instr.srcReg2);
-					allOperandsAvailable = false;
-				}
 				else
-				{
-					selectedRS->Vk = instr.srcReg2; // Source register 2 is available
-				}
+					selectedRS->Vk = instr.srcReg2;
 			}
 
-			if (!selectedRS->Vj.empty() && !selectedRS->Vk.empty() && selectedRS->Qj.empty() && selectedRS->Qk.empty())
-			{
-				// Both operands are available, issue the instruction
-				selectedRS->busy = true;
-				selectedRS->op = instr.op;
-				selectedRS->dest = instr.destRegister;
-			}
 			if (instr.op != STORE)
-			{
 				RRS.updateRegisterStatus(instr.destRegister, selectedRS->name);
-			}
+
 			return true;
 		}
-		else
-		{
-			return false;
-		}
+
+		return false; // RS unavailable
 	}
 
+	// ---------------------------------------------------------------------
+	// Execute & Writeback
+	// ---------------------------------------------------------------------
+	// Steps:
+	//   1. Advance timers for executable instructions
+	//   2. Update RS operands if their producer RS just broadcasted
+	//   3. Writeback to register file and release RS
+	// ---------------------------------------------------------------------
 	void executeInstruction(int currentCycle)
 	{
-
+		// Countdown for all RS banks
 		loadRS.updateRemainingCycles(RRS, instructionStatuses, currentCycle);
 		storeRS.updateRemainingCycles(RRS, instructionStatuses, currentCycle);
 		addRS.updateRemainingCycles(RRS, instructionStatuses, currentCycle);
 		multRS.updateRemainingCycles(RRS, instructionStatuses, currentCycle);
 
-		CDBMessage message("", 1, -1);
-		message = cdb.getLastMessage();
-		int op = message.op;
-		// cout << "ALERT: Station to be updated in RS and RRS: " << message.stationName << " Op: " << op << endl;
-
+		// Get completed instruction on CDB and update consumers
+		CDBMessage message = cdb.getLastMessage();
 		addRS.update(message.stationName);
 		multRS.update(message.stationName);
 		loadRS.update(message.stationName);
 		storeRS.update(message.stationName);
 
-		switch (message.op)
-		{
-		case ADD:
-			cout << "Update Step) Updating CDB RS: " << message.stationName << endl;
-
+		// Broadcast result to register file
+		if (message.op != -1)
 			RRS.updateRRS(message.stationName);
 
-			break;
-		case SUB:
-			RRS.updateRRS(message.stationName);
-			break;
-		case MULT:
-			RRS.updateRRS(message.stationName);
-			break;
-		case DIV:
-			RRS.updateRRS(message.stationName);
-			multRS.completeWriteBack(message.stationName, instructionStatuses, currentCycle);
-			break;
-		case LOAD:
-			RRS.updateRRS(message.stationName);
-			break;
-		case STORE:
-			RRS.updateRRS(message.stationName);
-			break;
-		}
-
+		// Mark instruction as written back and release RS
 		addRS.completeWriteBack(message.stationName, instructionStatuses, currentCycle);
 		multRS.completeWriteBack(message.stationName, instructionStatuses, currentCycle);
 		loadRS.completeWriteBack(message.stationName, instructionStatuses, currentCycle);
 		storeRS.completeWriteBack(message.stationName, instructionStatuses, currentCycle);
 
+		// Remove the message that was processed
 		cdb.RemoveSmallest();
 	}
 
-	RegisterResultStatuses getFinalRegisterResultStatuses()
-	{
-		return RRS;
-	}
+	// Returns final register result status
+	RegisterResultStatuses getFinalRegisterResultStatuses() { return RRS; }
 
+	// Pretty print all RS states
 	void printAllStations() const
 	{
-		std::cout << "Load Reservation Stations:" << std::endl;
+		std::cout << "Load Reservation Stations:\n";
 		loadRS.printStations();
-
-		std::cout << "\nStore Reservation Stations:" << std::endl;
+		std::cout << "\nStore Reservation Stations:\n";
 		storeRS.printStations();
-
-		std::cout << "\nAdd Reservation Stations:" << std::endl;
+		std::cout << "\nAdd Reservation Stations:\n";
 		addRS.printStations();
-
-		std::cout << "\nMultiply Reservation Stations:" << std::endl;
+		std::cout << "\nMultiply Reservation Stations:\n";
 		multRS.printStations();
 	}
 
-	std::vector<InstructionStatus> getInstructionStatuses() const
-	{
-		return instructionStatuses;
-	}
+	// Returns status of all instructions
+	std::vector<InstructionStatus> getInstructionStatuses() const { return instructionStatuses; }
 
+	// True when all instructions have written their results
 	bool getExecutionStatus()
 	{
-		// Return True after a particular instruction RS has written back to RRS
-		bool executionComplete = true;
-
 		for (auto &st : instructionStatuses)
 		{
-			if (st.isComplete == false)
-			{
-				bool executionComplete = false;
-				return executionComplete;
-			}
+			if (!st.isComplete)
+				return false;
 		}
-		cout << endl;
-		return executionComplete;
+		return true;
 	}
 
 private:
+	// Reservation Station pools
 	ReservationStations loadRS, storeRS, addRS, multRS;
 };
-
-/*********************************** ↑↑↑ Todo: Implement by you ↑↑↑ ******************************************/
 
 /*
 print the instruction status, the reservation stations and the register result status
@@ -788,75 +615,74 @@ void PrintRegisterResultStatus4Grade(const string &filename,
 
 int main(int argc, char **argv)
 {
+	// Parse command-line arguments for config and trace file names
 	if (argc > 1)
 	{
 		hardwareconfigname = argv[1];
 		inputtracename = argv[2];
 	}
 
+	// Load hardware configuration from file
 	HardwareConfig hardwareConfig;
 	std::ifstream config;
 	config.open(hardwareconfigname);
-	config >> hardwareConfig.LoadRSsize;  // number of load reservation stations
-	config >> hardwareConfig.StoreRSsize; // number of store reservation stations
-	config >> hardwareConfig.AddRSsize;	  // number of add reservation stations
-	config >> hardwareConfig.MultRSsize;  // number of multiply reservation stations
-	config >> hardwareConfig.FRegSize;	  // number of fp registers
+	config >> hardwareConfig.LoadRSsize;   // Number of Load RS entries
+	config >> hardwareConfig.StoreRSsize;  // Number of Store RS entries
+	config >> hardwareConfig.AddRSsize;    // Number of Add RS entries
+	config >> hardwareConfig.MultRSsize;   // Number of Mult RS entries
+	config >> hardwareConfig.FRegSize;     // Number of FP registers
 	config.close();
 
-	// Initialize RSS, Instruction Status Vector and Instruction Queue
+	// Read instruction trace from input file
 	vector<Instruction> instructions = readInstruction("trace.txt");
+
+	// Initialize register result status and instruction status tracker
 	RegisterResultStatuses RSS;
 	vector<InstructionStatus> instructionStatus;
 
-	// Initialize Algorithm
+	// Initialize Tomasulo simulator
 	TomasuloAlgorithm algo(hardwareConfig, instructions.size());
 
 	int cycleCount = 1;
 	bool instructionExecuted = false;
 	int instructionIndex = 0;
+
+	// Main simulation loop
 	while (cycleCount < 100000)
 	{
-		// cout << "+++++++++++++++++++++++++|| CYCLE : " << cycleCount << " ||+++++++++++++++++++++++++++++++++++++++++++" << endl;
-
+		// Step 1: Execute stage – check all RS and update remaining cycles
 		algo.executeInstruction(cycleCount);
 
-		// Check if there are more instructions to issue or process
-
-		// cout << "Current Cycle in Main Loop: " << cycleCount - 1 << endl;
-		// cout << "Fetching Instruction Number: " << instructionIndex << endl;
+		// Step 2: Issue instruction if available and RS has space
 		if (instructionIndex < instructions.size())
 		{
-
 			instructionExecuted = algo.issueInstructions(instructions[instructionIndex], cycleCount, instructionIndex);
 		}
 
+		// Step 3: If issued successfully, move to next instruction
 		if (instructionExecuted)
 		{
 			++instructionIndex;
-
 			instructionExecuted = false;
 		}
 
-		// algo.printAllStations(); // To Debug;
+		// Step 4: Log register result status every 5 cycles
 		PrintRegisterResultStatus4Grade(outputtracename, algo.getFinalRegisterResultStatuses(), cycleCount);
-		// cout << algo.getFinalRegisterResultStatuses()._printRegisterResultStatus() << endl; // Debug;
 
-		//   Update cycle count
+		// Step 5: Increment global cycle count
 		++cycleCount;
-		// cdb.printCDB();
 
-		// check if all all instructions are executed
+		// Step 6: Exit loop when all instructions have completed
 		if (algo.getExecutionStatus())
 		{
 			break;
 		}
 	}
+
+	// Fetch final instruction status timeline
 	instructionStatus = algo.getInstructionStatuses();
 
-	/*********************************** ↑↑↑ Todo: Implement by you ↑↑↑ ******************************************/
-
-	// At the end of the program, print Instruction Status Table for grading
+	// Print final instruction status to output file
 	PrintResult4Grade(outputtracename, instructionStatus);
 
 	return 0;
